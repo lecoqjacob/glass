@@ -1,7 +1,8 @@
-use wgpu::{CommandEncoder, SurfaceTexture};
+use wgpu::{CommandBuffer, CommandEncoder, StoreOp, SurfaceTexture};
 use winit::{
-    event::Event,
-    event_loop::{EventLoop, EventLoopWindowTarget},
+    event::{DeviceEvent, DeviceId, WindowEvent},
+    event_loop::ActiveEventLoop,
+    window::WindowId,
 };
 
 use crate::{window::GlassWindow, GlassContext};
@@ -20,19 +21,35 @@ pub struct RenderData<'a> {
 /// table of contents of your app flow.
 pub trait GlassApp {
     /// Run at start
-    fn start(&mut self, _event_loop: &EventLoop<()>, _context: &mut GlassContext) {}
-    /// Run on each event received from winit
-    fn input(
+    fn start(&mut self, _event_loop: &ActiveEventLoop, _context: &mut GlassContext) {}
+    /// Run on winit's `new_events`
+    fn before_input(&mut self, _context: &mut GlassContext, _event_loop: &ActiveEventLoop) {}
+    /// Run on each device event from winit
+    fn device_input(
         &mut self,
         _context: &mut GlassContext,
-        _event_loop: &EventLoopWindowTarget<()>,
-        _event: &Event<()>,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        _event: &DeviceEvent,
     ) {
     }
-    /// Run each frame
+    /// Run on each window event from winit
+    fn window_input(
+        &mut self,
+        _context: &mut GlassContext,
+        _event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        _event: &WindowEvent,
+    ) {
+    }
+    /// Run each frame, called within winit's `about_to_wait`.
     fn update(&mut self, _context: &mut GlassContext) {}
     /// Run each frame for each window after update
-    fn render(&mut self, _context: &GlassContext, _render_data: RenderData) {
+    fn render(
+        &mut self,
+        _context: &GlassContext,
+        _render_data: RenderData,
+    ) -> Option<Vec<CommandBuffer>> {
         let RenderData {
             encoder,
             frame,
@@ -49,17 +66,17 @@ pub trait GlassApp {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: true,
+                        store: StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
         }
+
+        None
     }
-    /// Run each frame for each window after rendering per window
-    fn post_processing(&mut self, _context: &GlassContext, _render_data: RenderData) {}
-    /// Run each frame for each window after post processing
-    fn after_render(&mut self, _context: &GlassContext) {}
     /// Run each frame last
     fn end_of_frame(&mut self, _context: &mut GlassContext) {}
     /// Run at exit

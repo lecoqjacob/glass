@@ -2,15 +2,14 @@ use std::borrow::Cow;
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::{
-    util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingResource, BindingType, Buffer, ColorTargetState, ColorWrites,
-    CommandEncoder, Device, Operations, PushConstantRange, RenderPassColorAttachment,
-    RenderPassDescriptor, RenderPipeline, SamplerBindingType, ShaderStages, TextureFormat,
-    TextureSampleType, TextureViewDimension,
+    util::DeviceExt, BindGroup, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
+    Buffer, ColorTargetState, ColorWrites, CommandEncoder, Device, Operations, PushConstantRange,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, Sampler, SamplerBindingType,
+    ShaderStages, TextureFormat, TextureSampleType, TextureView, TextureViewDimension,
 };
 
 use crate::{
-    pipelines::{SimpleVertex, FULL_SCREEN_TRIANGLE_VERTICES},
+    pipelines::{SimpleTexturedVertex, FULL_SCREEN_TRIANGLE_VERTICES},
     texture::Texture,
 };
 
@@ -36,7 +35,7 @@ impl TonemappingPipeline {
                     binding: 0,
                     ty: BindingType::Texture {
                         sample_type: TextureSampleType::Float {
-                            filterable: true,
+                            filterable: false,
                         },
                         view_dimension: TextureViewDimension::D2,
                         multisampled: false,
@@ -46,7 +45,7 @@ impl TonemappingPipeline {
                 },
                 BindGroupLayoutEntry {
                     binding: 1,
-                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    ty: BindingType::Sampler(SamplerBindingType::NonFiltering),
                     visibility: ShaderStages::FRAGMENT,
                     count: None,
                 },
@@ -69,12 +68,14 @@ impl TonemappingPipeline {
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
-                buffers: &[SimpleVertex::desc()],
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[SimpleTexturedVertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fragment",
+                entry_point: Some("fragment"),
+                compilation_options: Default::default(),
                 targets: &[Some(ColorTargetState {
                     format: TONEMAPPING_TEXTURE_FORMAT,
                     blend: None,
@@ -85,6 +86,7 @@ impl TonemappingPipeline {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
+            cache: None,
         });
 
         TonemappingPipeline {
@@ -93,29 +95,38 @@ impl TonemappingPipeline {
         }
     }
 
-    pub fn tonemap(
+    pub fn create_bind_group(
         &self,
         device: &Device,
+        image: &TextureView,
+        sampler: &Sampler,
+    ) -> BindGroup {
+        let bind_group_layout = self.tonemapping_pipeline.get_bind_group_layout(0);
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(image),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+            label: Some("tonemap_bind_group"),
+        });
+        bind_group
+    }
+
+    pub fn tonemap(
+        &self,
         encoder: &mut CommandEncoder,
-        input: &Texture,
+        input_image_bind_group: &BindGroup,
         output: &Texture,
         color_grading: ColorGrading,
     ) {
         let push_constants: ToneMappingPushConstants = color_grading.into();
-        let bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("tonemapping_bind_group"),
-            layout: &self.tonemapping_pipeline.get_bind_group_layout(0),
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::TextureView(&input.views[0]),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::Sampler(&input.sampler),
-                },
-            ],
-        });
         {
             let mut r_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("tonemapping_pass"),
@@ -125,9 +136,11 @@ impl TonemappingPipeline {
                     ops: Operations::default(),
                 })],
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
             r_pass.set_pipeline(&self.tonemapping_pipeline);
-            r_pass.set_bind_group(0, &bind_group, &[]);
+            r_pass.set_bind_group(0, input_image_bind_group, &[]);
             r_pass.set_vertex_buffer(0, self.vertices.slice(..));
             r_pass.set_push_constants(
                 ShaderStages::FRAGMENT,

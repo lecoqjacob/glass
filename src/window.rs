@@ -1,10 +1,11 @@
-use glam::IVec2;
+use std::sync::Arc;
+
 use wgpu::{
     CompositeAlphaMode, CreateSurfaceError, Device, PresentMode, Surface, SurfaceConfiguration,
     TextureFormat,
 };
 use winit::{
-    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
     monitor::MonitorHandle,
     window::{Fullscreen, Window},
 };
@@ -19,6 +20,8 @@ pub struct WindowConfig {
     pub pos: WindowPos,
     pub present_mode: PresentMode,
     pub alpha_mode: CompositeAlphaMode,
+    pub surface_format: TextureFormat,
+    pub desired_maximum_frame_latency: u32,
     pub max_size: Option<LogicalSize<u32>>,
     pub min_size: Option<LogicalSize<u32>>,
     pub exit_on_esc: bool,
@@ -33,6 +36,8 @@ impl Default for WindowConfig {
             pos: WindowPos::Centered,
             present_mode: PresentMode::AutoVsync,
             alpha_mode: CompositeAlphaMode::Auto,
+            surface_format: GlassWindow::default_surface_format(),
+            desired_maximum_frame_latency: 2,
             exit_on_esc: false,
             max_size: None,
             min_size: None,
@@ -63,10 +68,12 @@ pub enum SurfaceError {
 }
 
 pub struct GlassWindow {
-    window: Window,
-    surface: Surface,
+    window: Arc<Window>,
+    surface: Surface<'static>,
     present_mode: PresentMode,
     alpha_mode: CompositeAlphaMode,
+    surface_format: TextureFormat,
+    desired_maximum_frame_latency: u32,
     exit_on_esc: bool,
     has_focus: bool,
     last_surface_size: [u32; 2],
@@ -77,21 +84,27 @@ impl GlassWindow {
     pub fn new(
         context: &DeviceContext,
         config: WindowConfig,
-        window: Window,
+        window: Arc<Window>,
     ) -> Result<GlassWindow, CreateSurfaceError> {
         let size = [window.inner_size().width, window.inner_size().height];
-        let surface = unsafe {
-            match context.instance().create_surface(&window) {
-                Ok(surface) => surface,
-                Err(e) => return Err(e),
-            }
-        };
+        let surface = context.instance().create_surface(window.clone())?;
+        let allowed_formats = GlassWindow::allowed_surface_formats();
+        if !(config.surface_format == allowed_formats[0]
+            || config.surface_format == allowed_formats[1])
+        {
+            panic!(
+                "{:?} not allowed. Surface should be created with either: {:?} or {:?}",
+                config.surface_format, allowed_formats[0], allowed_formats[1]
+            );
+        }
         Ok(GlassWindow {
             window,
             surface,
             present_mode: config.present_mode,
             alpha_mode: config.alpha_mode,
+            surface_format: config.surface_format,
             exit_on_esc: config.exit_on_esc,
+            desired_maximum_frame_latency: config.desired_maximum_frame_latency,
             has_focus: false,
             last_surface_size: size,
         })
@@ -101,12 +114,13 @@ impl GlassWindow {
     pub(crate) fn configure_surface_with_size(&mut self, device: &Device, size: PhysicalSize<u32>) {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: Self::surface_format(),
+            format: self.surface_format,
             width: size.width,
             height: size.height,
             present_mode: self.present_mode,
             alpha_mode: self.alpha_mode,
             view_formats: vec![],
+            desired_maximum_frame_latency: self.desired_maximum_frame_latency,
         };
         self.configure_surface(device, &config);
         self.last_surface_size = [size.width, size.height];
@@ -117,6 +131,8 @@ impl GlassWindow {
         self.surface.configure(device, config);
         self.present_mode = config.present_mode;
         self.alpha_mode = config.alpha_mode;
+        self.surface_format = config.format;
+        self.desired_maximum_frame_latency = config.desired_maximum_frame_latency;
         self.last_surface_size = [config.width, config.height];
     }
 
@@ -153,7 +169,7 @@ impl GlassWindow {
             WindowPos::Centered => {
                 if let Some(monitor) = self.window.current_monitor() {
                     self.window.set_fullscreen(None);
-                    let size = self.window.inner_size();
+                    let size = self.window.inner_size().to_logical(monitor.scale_factor());
                     self.window.set_outer_position(get_centered_window_position(
                         &monitor,
                         size.width,
@@ -179,8 +195,14 @@ impl GlassWindow {
         self.present_mode
     }
 
-    /// Return [`TextureFormat`](wgpu::TextureFormat) belonging to the window surface
-    pub fn surface_format() -> TextureFormat {
+    /// Return allowed [`TextureFormat`](wgpu::TextureFormat)s for the surface.
+    /// These are `Bgra8UnormSrgb` and `Bgra8Unorm`
+    pub fn allowed_surface_formats() -> [TextureFormat; 2] {
+        [TextureFormat::Bgra8UnormSrgb, TextureFormat::Bgra8Unorm]
+    }
+
+    /// Return default [`TextureFormat`](wgpu::TextureFormat)s
+    pub fn default_surface_format() -> TextureFormat {
         TextureFormat::Bgra8UnormSrgb
     }
 
@@ -205,19 +227,18 @@ pub fn get_centered_window_position(
     monitor: &MonitorHandle,
     window_width: u32,
     window_height: u32,
-) -> PhysicalPosition<i32> {
-    let size = monitor.size();
-    let center = IVec2::new(size.width as i32, size.height as i32) / 2;
-    let window_size = PhysicalSize::new(window_width, window_height);
-    let left_top = center - IVec2::new(window_size.width as i32, window_size.height as i32) / 2;
-    PhysicalPosition::new(left_top.x, left_top.y)
+) -> LogicalPosition<i32> {
+    let size: LogicalSize<i32> = monitor.size().to_logical(monitor.scale_factor());
+    let lt_x = size.width / 2 - window_width as i32 / 2;
+    let lt_y = size.height / 2 - window_height as i32 / 2;
+    LogicalPosition::new(lt_x, lt_y)
 }
 
 pub fn get_fitting_videomode(
     monitor: &winit::monitor::MonitorHandle,
     width: u32,
     height: u32,
-) -> winit::monitor::VideoMode {
+) -> winit::monitor::VideoModeHandle {
     let mut modes = monitor.video_modes().collect::<Vec<_>>();
 
     fn abs_diff(a: u32, b: u32) -> u32 {
@@ -245,7 +266,9 @@ pub fn get_fitting_videomode(
     modes.first().unwrap().clone()
 }
 
-pub fn get_best_videomode(monitor: &winit::monitor::MonitorHandle) -> winit::monitor::VideoMode {
+pub fn get_best_videomode(
+    monitor: &winit::monitor::MonitorHandle,
+) -> winit::monitor::VideoModeHandle {
     let mut modes = monitor.video_modes().collect::<Vec<_>>();
     modes.sort_by(|a, b| {
         use std::cmp::Ordering::*;

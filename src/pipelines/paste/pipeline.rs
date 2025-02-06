@@ -1,13 +1,12 @@
 use std::borrow::Cow;
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec2;
 use wgpu::{
-    util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingResource, BindingType, Buffer, Color, ColorTargetState,
-    ColorWrites, CommandEncoder, Device, Operations, PushConstantRange, RenderPassColorAttachment,
-    RenderPassDescriptor, RenderPipeline, SamplerBindingType, ShaderStages, TextureFormat,
-    TextureSampleType, TextureViewDimension,
+    util::DeviceExt, BindGroup, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
+    Buffer, Color, ColorTargetState, ColorWrites, CommandEncoder, Device, Operations,
+    PushConstantRange, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, Sampler,
+    SamplerBindingType, ShaderStages, TextureFormat, TextureSampleType, TextureView,
+    TextureViewDimension,
 };
 
 use crate::{
@@ -22,7 +21,11 @@ pub struct PastePipeline {
 }
 
 impl PastePipeline {
-    pub fn new(device: &Device, target_texture_format: TextureFormat) -> PastePipeline {
+    pub fn new(
+        device: &Device,
+        target_texture_format: TextureFormat,
+        is_nearest: bool,
+    ) -> PastePipeline {
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Paste Vertex Buffer"),
             contents: bytemuck::cast_slice(
@@ -47,29 +50,56 @@ impl PastePipeline {
             usage: wgpu::BufferUsages::INDEX,
         });
         // Bind group layout
-        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("paste_bind_group_layout"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float {
-                            filterable: true,
+        let bind_group_layout = if is_nearest {
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("paste_bind_group_layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        ty: BindingType::Texture {
+                            sample_type: TextureSampleType::Float {
+                                filterable: false,
+                            },
+                            view_dimension: TextureViewDimension::D2,
+                            multisampled: false,
                         },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
+                        visibility: ShaderStages::FRAGMENT,
+                        count: None,
                     },
-                    visibility: ShaderStages::FRAGMENT,
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                    visibility: ShaderStages::FRAGMENT,
-                    count: None,
-                },
-            ],
-        });
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        ty: BindingType::Sampler(SamplerBindingType::NonFiltering),
+                        visibility: ShaderStages::FRAGMENT,
+                        count: None,
+                    },
+                ],
+            })
+        } else {
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("paste_bind_group_layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        ty: BindingType::Texture {
+                            sample_type: TextureSampleType::Float {
+                                filterable: true,
+                            },
+                            view_dimension: TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        visibility: ShaderStages::FRAGMENT,
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                        visibility: ShaderStages::FRAGMENT,
+                        count: None,
+                    },
+                ],
+            })
+        };
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Paste Shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("paste.wgsl"))),
@@ -87,12 +117,14 @@ impl PastePipeline {
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
                 buffers: &[TexturedVertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fragment",
+                entry_point: Some("fragment"),
+                compilation_options: Default::default(),
                 targets: &[Some(ColorTargetState {
                     format: target_texture_format,
                     blend: Some(wgpu::BlendState {
@@ -106,6 +138,7 @@ impl PastePipeline {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
+            cache: None,
         });
 
         PastePipeline {
@@ -115,46 +148,55 @@ impl PastePipeline {
         }
     }
 
+    pub fn create_input_bind_group(
+        &self,
+        device: &Device,
+        image: &TextureView,
+        sampler: &Sampler,
+    ) -> BindGroup {
+        let bind_group_layout = self.paste_pipeline.get_bind_group_layout(0);
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(image),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+            label: Some("paste_bind_group"),
+        });
+        bind_group
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn paste(
         &self,
-        device: &Device,
         encoder: &mut CommandEncoder,
         ops: Operations<Color>,
-        input: &Texture,
+        input_image_bind_group: &BindGroup,
         output: &Texture,
         tint: [f32; 4],
-        size: Vec2,
-        offset: Vec2,
+        size: [f32; 2],
+        offset: [f32; 2],
         flip_x: bool,
         flip_y: bool,
     ) {
-        let image_size = Vec2::new(size.x / output.size[0], size.y / output.size[1]);
+        let image_size = [size[0] / output.size[0], size[1] / output.size[1]];
         let push_constants: PastePushConstants = PastePushConstants {
             tint,
             scale: [
-                image_size.x * if flip_x { -1.0 } else { 1.0 },
-                image_size.y * if flip_y { -1.0 } else { 1.0 },
+                image_size[0] * if flip_x { -1.0 } else { 1.0 },
+                image_size[1] * if flip_y { -1.0 } else { 1.0 },
             ],
             offset: [
-                (2.0 * offset.x - output.size[0]) / output.size[0],
-                -(2.0 * offset.y - output.size[1]) / output.size[1],
+                (2.0 * offset[0] - output.size[0]) / output.size[0],
+                -(2.0 * offset[1] - output.size[1]) / output.size[1],
             ],
         };
-        let bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("paste_bind_group"),
-            layout: &self.paste_pipeline.get_bind_group_layout(0),
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::TextureView(&input.views[0]),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::Sampler(&input.sampler),
-                },
-            ],
-        });
         {
             let mut r_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("paste_pass"),
@@ -164,9 +206,11 @@ impl PastePipeline {
                     ops,
                 })],
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
             r_pass.set_pipeline(&self.paste_pipeline);
-            r_pass.set_bind_group(0, &bind_group, &[]);
+            r_pass.set_bind_group(0, input_image_bind_group, &[]);
             r_pass.set_vertex_buffer(0, self.vertices.slice(..));
             r_pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
             r_pass.set_push_constants(

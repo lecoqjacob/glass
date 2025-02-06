@@ -10,14 +10,15 @@ use glass::{
     Glass, GlassApp, GlassConfig, GlassContext, GlassError, RenderData,
 };
 use wgpu::{
-    AddressMode, Backends, BindGroup, BindGroupDescriptor, CommandEncoder, ComputePassDescriptor,
-    ComputePipeline, ComputePipelineDescriptor, Extent3d, FilterMode, Limits, PowerPreference,
-    PresentMode, PushConstantRange, SamplerDescriptor, ShaderStages, StorageTextureAccess,
+    Backends, BindGroup, BindGroupDescriptor, CommandBuffer, CommandEncoder, ComputePassDescriptor,
+    ComputePipeline, ComputePipelineDescriptor, Extent3d, InstanceFlags, Limits, MemoryHints,
+    PowerPreference, PresentMode, PushConstantRange, ShaderStages, StorageTextureAccess, StoreOp,
     TextureFormat, TextureUsages,
 };
 use winit::{
-    event::{ElementState, Event, MouseButton, WindowEvent},
-    event_loop::{EventLoop, EventLoopWindowTarget},
+    event::{ElementState, MouseButton, WindowEvent},
+    event_loop::ActiveEventLoop,
+    window::WindowId,
 };
 
 const WIDTH: u32 = 1024;
@@ -35,6 +36,7 @@ fn config() -> GlassConfig {
     GlassConfig {
         device_config: DeviceConfig {
             power_preference: PowerPreference::HighPerformance,
+            memory_hints: MemoryHints::Performance,
             features: wgpu::Features::PUSH_CONSTANTS
                 | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
             limits: Limits {
@@ -42,6 +44,8 @@ fn config() -> GlassConfig {
                 ..Limits::default()
             },
             backends: Backends::all(),
+            instance_flags: InstanceFlags::from_build_config(),
+            trace_path: None,
         },
         window_configs: vec![WindowConfig {
             width: WIDTH,
@@ -54,7 +58,7 @@ fn config() -> GlassConfig {
 }
 
 fn main() -> Result<(), GlassError> {
-    Glass::new(GameOfLifeApp::default(), config()).run()
+    Glass::run(config(), |_| Box::new(GameOfLifeApp::default()))
 }
 
 // Think of this like reading a "table of contents".
@@ -63,12 +67,12 @@ fn main() -> Result<(), GlassError> {
 // - Update is run every frame
 // - Render is run for each window after update every frame
 impl GlassApp for GameOfLifeApp {
-    fn start(&mut self, _event_loop: &EventLoop<()>, context: &mut GlassContext) {
+    fn start(&mut self, _event_loop: &ActiveEventLoop, context: &mut GlassContext) {
         // Create pipelines
         let (init_pipeline, game_of_life_pipeline, draw_pipeline) =
             create_game_of_life_pipeline(context);
         let quad_pipeline = QuadPipeline::new(context.device(), wgpu::ColorTargetState {
-            format: GlassWindow::surface_format(),
+            format: GlassWindow::default_surface_format(),
             blend: Some(wgpu::BlendState {
                 color: wgpu::BlendComponent::OVER,
                 alpha: wgpu::BlendComponent::OVER,
@@ -88,11 +92,12 @@ impl GlassApp for GameOfLifeApp {
         init_game_of_life(self, context);
     }
 
-    fn input(
+    fn window_input(
         &mut self,
         _context: &mut GlassContext,
-        _event_loop: &EventLoopWindowTarget<()>,
-        event: &Event<()>,
+        _event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: &WindowEvent,
     ) {
         handle_inputs(self, event);
     }
@@ -101,8 +106,12 @@ impl GlassApp for GameOfLifeApp {
         run_update(self, context);
     }
 
-    fn render(&mut self, _context: &GlassContext, render_data: RenderData) {
-        render(self, render_data);
+    fn render(
+        &mut self,
+        _context: &GlassContext,
+        render_data: RenderData,
+    ) -> Option<Vec<CommandBuffer>> {
+        render(self, render_data)
     }
 }
 
@@ -120,6 +129,7 @@ struct GameOfLifeApp {
     time: Instant,
     updated_time: Instant,
     count: usize,
+    commands: Option<CommandBuffer>,
 }
 
 impl Default for GameOfLifeApp {
@@ -138,6 +148,7 @@ impl Default for GameOfLifeApp {
             time: Instant::now(),
             updated_time: Instant::now(),
             count: 0,
+            commands: None,
         }
     }
 }
@@ -153,7 +164,7 @@ impl GameOfLifeApp {
     }
 }
 
-fn run_update(app: &mut GameOfLifeApp, context: &mut GlassContext) {
+fn run_update(app: &mut GameOfLifeApp, context: &GlassContext) {
     let now = Instant::now();
     app.dt_sum += (now - app.time).as_secs_f32();
     app.num_dts += 1.0;
@@ -184,11 +195,10 @@ fn run_update(app: &mut GameOfLifeApp, context: &mut GlassContext) {
     }
     // Update prev cursor pos
     app.prev_cursor_pos = Some(app.cursor_pos);
-    // Submit
-    context.queue().submit(Some(encoder.finish()));
+    app.commands = Some(encoder.finish());
 }
 
-fn render(app: &mut GameOfLifeApp, render_data: RenderData) {
+fn render(app: &mut GameOfLifeApp, render_data: RenderData) -> Option<Vec<CommandBuffer>> {
     let GameOfLifeApp {
         data,
         quad_pipeline,
@@ -222,10 +232,12 @@ fn render(app: &mut GameOfLifeApp, render_data: RenderData) {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                    store: true,
+                    store: StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
         });
         quad_pipeline.draw(
             &mut rpass,
@@ -235,35 +247,31 @@ fn render(app: &mut GameOfLifeApp, render_data: RenderData) {
             canvas_data.canvas.size,
             1.0,
         );
+        Some(vec![app.commands.take().unwrap()])
     }
 }
 
-fn handle_inputs(app: &mut GameOfLifeApp, event: &Event<()>) {
-    if let Event::WindowEvent {
-        event, ..
-    } = event
-    {
-        match event {
-            WindowEvent::CursorMoved {
-                position, ..
-            } => {
-                app.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
-            }
-            WindowEvent::MouseInput {
-                button: MouseButton::Left,
-                state,
-                ..
-            } => {
-                app.draw = state == &ElementState::Pressed;
-            }
-            _ => (),
+fn handle_inputs(app: &mut GameOfLifeApp, event: &WindowEvent) {
+    match event {
+        WindowEvent::CursorMoved {
+            position, ..
+        } => {
+            app.cursor_pos = Vec2::new(position.x as f32, position.y as f32);
         }
+        WindowEvent::MouseInput {
+            button: MouseButton::Left,
+            state,
+            ..
+        } => {
+            app.draw = state == &ElementState::Pressed;
+        }
+        _ => (),
     }
 }
 
 fn draw_game_of_life(
     app: &mut GameOfLifeApp,
-    context: &mut GlassContext,
+    context: &GlassContext,
     encoder: &mut CommandEncoder,
 ) {
     let scale_factor = context.primary_render_window().window().scale_factor() as f32;
@@ -282,6 +290,7 @@ fn draw_game_of_life(
 
     let mut cpass = encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some("Update"),
+        timestamp_writes: None,
     });
     let pc = GameOfLifePushConstants::new(start, end, 10.0);
     cpass.set_pipeline(draw_pipeline);
@@ -323,6 +332,7 @@ fn update_game_of_life(
     });
     let mut cpass = encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some("Update"),
+        timestamp_writes: None,
     });
     let pc = GameOfLifePushConstants::new(Vec2::ZERO, Vec2::ZERO, 0.0);
     cpass.set_pipeline(game_of_life_pipeline);
@@ -333,7 +343,7 @@ fn update_game_of_life(
     app.count += 1;
 }
 
-fn init_game_of_life(app: &mut GameOfLifeApp, context: &mut GlassContext) {
+fn init_game_of_life(app: &mut GameOfLifeApp, context: &GlassContext) {
     let GameOfLifeApp {
         data,
         init_pipeline,
@@ -350,6 +360,7 @@ fn init_game_of_life(app: &mut GameOfLifeApp, context: &mut GlassContext) {
     {
         let mut cpass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("Init"),
+            timestamp_writes: None,
         });
         cpass.set_pipeline(init_pipeline);
         cpass.set_bind_group(0, &data.init_bind_group, &[]);
@@ -404,15 +415,6 @@ fn create_canvas_data(
         },
         1,
         TextureFormat::Rgba16Float,
-        &SamplerDescriptor {
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            address_mode_w: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Linear,
-            ..Default::default()
-        },
         TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
     );
     let data_in = Texture::empty(
@@ -425,20 +427,14 @@ fn create_canvas_data(
         },
         1,
         TextureFormat::Rgba16Float,
-        &SamplerDescriptor {
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            address_mode_w: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Nearest,
-            min_filter: FilterMode::Nearest,
-            mipmap_filter: FilterMode::Nearest,
-            ..Default::default()
-        },
         TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
     );
     // Create bind groups to match pipeline layouts (except update, create that dynamically each frame)
-    let canvas_bind_group =
-        quad_pipeline.create_bind_group(context.device(), &canvas.views[0], &canvas.sampler);
+    let canvas_bind_group = quad_pipeline.create_bind_group(
+        context.device(),
+        &canvas.views[0],
+        context.sampler_linear_clamp_to_edge(),
+    );
     // These must match the bind group layout of our pipeline
     let init_bind_group_layout = init_pipeline.get_bind_group_layout(0);
     let init_bind_group = context.device().create_bind_group(&BindGroupDescriptor {
@@ -474,7 +470,7 @@ fn create_canvas_data(
 }
 
 fn create_game_of_life_pipeline(
-    context: &mut GlassContext,
+    context: &GlassContext,
 ) -> (ComputePipeline, ComputePipeline, ComputePipeline) {
     let dr_layout = context
         .device()
@@ -549,7 +545,9 @@ fn create_game_of_life_pipeline(
             label: Some("Init Pipeline"),
             layout: Some(&game_of_life_init_layout),
             module: &game_of_life_shader,
-            entry_point: "init",
+            entry_point: Some("init"),
+            compilation_options: Default::default(),
+            cache: None,
         });
 
     let game_of_life_layout =
@@ -569,7 +567,9 @@ fn create_game_of_life_pipeline(
             label: Some("Update Pipeline"),
             layout: Some(&game_of_life_layout),
             module: &game_of_life_shader,
-            entry_point: "update",
+            entry_point: Some("update"),
+            compilation_options: Default::default(),
+            cache: None,
         });
 
     let draw_layout = context
@@ -588,7 +588,9 @@ fn create_game_of_life_pipeline(
             label: Some("Draw Pipeline"),
             layout: Some(&draw_layout),
             module: &brush_shader,
-            entry_point: "main",
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
         });
 
     (init_pipeline, update_pipeline, draw_pipeline)

@@ -1,23 +1,22 @@
 use std::borrow::Cow;
 
 use bytemuck::{Pod, Zeroable};
-use glam::{UVec2, UVec4, Vec4};
 use wgpu::{
     util::DeviceExt, AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendComponent,
     BlendFactor, BlendOperation, BlendState, Buffer, Color, ColorTargetState, ColorWrites,
     CommandEncoder, Device, Extent3d, FilterMode, LoadOp, Operations, PushConstantRange,
-    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, SamplerBindingType,
-    SamplerDescriptor, ShaderStages, TextureFormat, TextureSampleType, TextureUsages,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, Sampler, SamplerBindingType,
+    SamplerDescriptor, ShaderStages, StoreOp, TextureFormat, TextureSampleType, TextureUsages,
     TextureViewDimension,
 };
 
 use crate::{
-    pipelines::{SimpleVertex, FULL_SCREEN_TRIANGLE_VERTICES},
+    pipelines::{SimpleTexturedVertex, FULL_SCREEN_TRIANGLE_VERTICES},
     texture::Texture,
 };
 
-const BLOOM_TEXTURE_FORMAT: TextureFormat = TextureFormat::Rg11b10Float;
+const BLOOM_TEXTURE_FORMAT: TextureFormat = TextureFormat::Rg11b10Ufloat;
 const FINAL_TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 const MAX_MIP_DIMENSION: u32 = 512;
 
@@ -32,13 +31,6 @@ fn create_bloom_texture(device: &Device, width: u32, height: u32, mip_count: u32
         },
         mip_count,
         BLOOM_TEXTURE_FORMAT,
-        &SamplerDescriptor {
-            min_filter: FilterMode::Linear,
-            mag_filter: FilterMode::Linear,
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            ..Default::default()
-        },
         TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
     )
 }
@@ -49,6 +41,7 @@ pub struct BloomPipeline {
     upsample_pipeline: RenderPipeline,
     final_pipeline: RenderPipeline,
     bloom_texture: Texture,
+    bloom_sampler: Sampler,
     downsampling_bind_groups: Vec<BindGroup>,
     upsampling_bind_groups: Vec<BindGroup>,
     vertices: Buffer,
@@ -124,12 +117,14 @@ impl BloomPipeline {
                 layout: Some(&layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: "vs_main",
-                    buffers: &[SimpleVertex::desc()],
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[SimpleTexturedVertex::desc()],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: "downsample_first",
+                    entry_point: Some("downsample_first"),
+                    compilation_options: Default::default(),
                     targets: &[Some(ColorTargetState {
                         format: BLOOM_TEXTURE_FORMAT,
                         blend: None,
@@ -140,18 +135,21 @@ impl BloomPipeline {
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
+                cache: None,
             });
         let downsample_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Bloom Downsample Pipeline"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
-                buffers: &[SimpleVertex::desc()],
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[SimpleTexturedVertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "downsample",
+                entry_point: Some("downsample"),
+                compilation_options: Default::default(),
                 targets: &[Some(ColorTargetState {
                     format: BLOOM_TEXTURE_FORMAT,
                     blend: None,
@@ -162,6 +160,7 @@ impl BloomPipeline {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
+            cache: None,
         });
 
         let color_blend = match bloom_settings.composite_mode {
@@ -182,12 +181,14 @@ impl BloomPipeline {
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
-                buffers: &[SimpleVertex::desc()],
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[SimpleTexturedVertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "upsample",
+                entry_point: Some("upsample"),
+                compilation_options: Default::default(),
                 targets: &[Some(ColorTargetState {
                     format: BLOOM_TEXTURE_FORMAT,
                     blend: Some(BlendState {
@@ -205,6 +206,7 @@ impl BloomPipeline {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
+            cache: None,
         });
 
         let final_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -212,12 +214,14 @@ impl BloomPipeline {
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
-                buffers: &[SimpleVertex::desc()],
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[SimpleTexturedVertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "upsample",
+                entry_point: Some("upsample"),
+                compilation_options: Default::default(),
                 targets: &[Some(ColorTargetState {
                     format: FINAL_TEXTURE_FORMAT,
                     blend: Some(BlendState {
@@ -235,6 +239,14 @@ impl BloomPipeline {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
+            cache: None,
+        });
+        let bloom_sampler = device.create_sampler(&SamplerDescriptor {
+            min_filter: FilterMode::Linear,
+            mag_filter: FilterMode::Linear,
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            ..Default::default()
         });
 
         let (downsampling_bind_groups, upsampling_bind_groups) = Self::create_bind_groups(
@@ -242,6 +254,7 @@ impl BloomPipeline {
             &downsample_pipeline,
             &upsample_pipeline,
             &bloom_texture,
+            &bloom_sampler,
             mip_count,
         );
 
@@ -251,6 +264,7 @@ impl BloomPipeline {
             upsample_pipeline,
             final_pipeline,
             bloom_texture,
+            bloom_sampler,
             downsampling_bind_groups,
             upsampling_bind_groups,
             vertices,
@@ -266,6 +280,7 @@ impl BloomPipeline {
         downsample_pipeline: &RenderPipeline,
         upsample_pipeline: &RenderPipeline,
         bloom_texture: &Texture,
+        bloom_sampler: &Sampler,
         mip_count: u32,
     ) -> (Vec<BindGroup>, Vec<BindGroup>) {
         let bind_group_count = mip_count as usize - 1;
@@ -281,7 +296,7 @@ impl BloomPipeline {
                     },
                     BindGroupEntry {
                         binding: 1,
-                        resource: BindingResource::Sampler(&bloom_texture.sampler),
+                        resource: BindingResource::Sampler(bloom_sampler),
                     },
                 ],
             }));
@@ -299,7 +314,7 @@ impl BloomPipeline {
                     },
                     BindGroupEntry {
                         binding: 1,
-                        resource: BindingResource::Sampler(&bloom_texture.sampler),
+                        resource: BindingResource::Sampler(bloom_sampler),
                     },
                 ],
             }));
@@ -326,16 +341,15 @@ impl BloomPipeline {
         device: &Device,
         encoder: &mut CommandEncoder,
         bloom_target: &Texture,
-        viewport_origin: UVec2,
-        viewport_size: UVec2,
+        viewport_origin: [u32; 2],
+        viewport_size: [u32; 2],
     ) {
         let size = bloom_target.size;
-        let push_constants = BloomPushConstants::new(
-            &self.settings,
-            viewport_origin,
-            viewport_size,
-            UVec2::new(size[0] as u32, size[1] as u32),
-        );
+        let push_constants =
+            BloomPushConstants::new(&self.settings, viewport_origin, viewport_size, [
+                size[0] as u32,
+                size[1] as u32,
+            ]);
         // First downsample pass (main image)
         let downsampling_first_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("bloom_downsampling_first_bind_group"),
@@ -348,7 +362,7 @@ impl BloomPipeline {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: BindingResource::Sampler(&self.bloom_texture.sampler),
+                    resource: BindingResource::Sampler(&self.bloom_sampler),
                 },
             ],
         });
@@ -363,6 +377,8 @@ impl BloomPipeline {
                     ops: Operations::default(),
                 })],
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
             first_downsample_pass.set_pipeline(&self.downsample_first_pipeline);
             first_downsample_pass.set_bind_group(0, &downsampling_first_bind_group, &[]);
@@ -386,11 +402,13 @@ impl BloomPipeline {
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Load,
-                        store: true,
+                        store: StoreOp::Store,
                     },
                     // ops: Operations::default(),
                 })],
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
             downsampling_pass.set_pipeline(&self.downsample_pipeline);
             downsampling_pass.set_bind_group(
@@ -419,10 +437,12 @@ impl BloomPipeline {
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Load,
-                        store: true,
+                        store: StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
             upsampling_pass.set_pipeline(&self.upsample_pipeline);
             upsampling_pass.set_bind_group(
@@ -457,10 +477,12 @@ impl BloomPipeline {
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Load,
-                        store: true,
+                        store: StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
             upsampling_final_pass.set_pipeline(&self.final_pipeline);
             upsampling_final_pass.set_bind_group(
@@ -470,10 +492,10 @@ impl BloomPipeline {
             );
             upsampling_final_pass.set_vertex_buffer(0, self.vertices.slice(..));
             upsampling_final_pass.set_viewport(
-                viewport_origin.x as f32,
-                viewport_origin.y as f32,
-                viewport_size.x as f32,
-                viewport_size.y as f32,
+                viewport_origin[0] as f32,
+                viewport_origin[1] as f32,
+                viewport_size[0] as f32,
+                viewport_size[1] as f32,
                 0.0,
                 1.0,
             );
@@ -506,37 +528,27 @@ pub struct BloomPushConstants {
 impl BloomPushConstants {
     pub fn new(
         settings: &BloomSettings,
-        viewport_origin: UVec2,
-        viewport_size: UVec2,
-        target_image_size: UVec2,
+        viewport_origin: [u32; 2],
+        viewport_size: [u32; 2],
+        target_image_size: [u32; 2],
     ) -> BloomPushConstants {
         let threshold = settings.prefilter_settings.threshold;
         let threshold_softness = settings.prefilter_settings.threshold_softness;
         let knee = threshold * threshold_softness.clamp(0.0, 1.0);
         BloomPushConstants {
-            threshold_precomputations: Vec4::new(
+            threshold_precomputations: [
                 threshold,
                 threshold - knee,
                 2.0 * knee,
                 0.25 / (knee + 0.00001),
-            )
-            .into(),
-            viewport: (UVec4::new(
-                viewport_origin.x,
-                viewport_origin.y,
-                viewport_size.x,
-                viewport_size.y,
-            )
-            .as_vec4()
-                / UVec4::new(
-                    target_image_size.x,
-                    target_image_size.y,
-                    target_image_size.x,
-                    target_image_size.y,
-                )
-                .as_vec4())
-            .into(),
-            aspect: viewport_size.x as f32 / viewport_size.y as f32,
+            ],
+            viewport: [
+                viewport_origin[0] as f32 / target_image_size[0] as f32,
+                viewport_origin[1] as f32 / target_image_size[1] as f32,
+                viewport_size[0] as f32 / target_image_size[0] as f32,
+                viewport_size[1] as f32 / target_image_size[1] as f32,
+            ],
+            aspect: viewport_size[0] as f32 / viewport_size[1] as f32,
             use_treshold: (threshold > 0.0) as u32,
         }
     }

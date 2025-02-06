@@ -5,10 +5,8 @@ use glass::{
     window::{GlassWindow, WindowConfig},
     Glass, GlassApp, GlassConfig, GlassContext, GlassError, RenderData,
 };
-use wgpu::{
-    AddressMode, BindGroup, FilterMode, Limits, SamplerDescriptor, TextureFormat, TextureUsages,
-};
-use winit::event_loop::EventLoop;
+use wgpu::{BindGroup, CommandBuffer, Limits, StoreOp, TextureFormat, TextureUsages};
+use winit::event_loop::ActiveEventLoop;
 
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
@@ -21,7 +19,7 @@ const OPENGL_TO_WGPU: glam::Mat4 = glam::Mat4::from_cols_array(&[
 ]);
 
 fn main() -> Result<(), GlassError> {
-    Glass::new(TreeApp::default(), config()).run()
+    Glass::run(config(), |_| Box::new(TreeApp::default()))
 }
 
 fn config() -> GlassConfig {
@@ -51,9 +49,9 @@ struct TreeApp {
 }
 
 impl GlassApp for TreeApp {
-    fn start(&mut self, _event_loop: &EventLoop<()>, context: &mut GlassContext) {
+    fn start(&mut self, _event_loop: &ActiveEventLoop, context: &mut GlassContext) {
         let quad_pipeline = QuadPipeline::new(context.device(), wgpu::ColorTargetState {
-            format: GlassWindow::surface_format(),
+            format: GlassWindow::default_surface_format(),
             blend: Some(wgpu::BlendState {
                 color: wgpu::BlendComponent::OVER,
                 alpha: wgpu::BlendComponent::OVER,
@@ -64,7 +62,11 @@ impl GlassApp for TreeApp {
         self.quad_pipeline = Some(quad_pipeline);
     }
 
-    fn render(&mut self, _context: &GlassContext, render_data: RenderData) {
+    fn render(
+        &mut self,
+        _context: &GlassContext,
+        render_data: RenderData,
+    ) -> Option<Vec<CommandBuffer>> {
         let TreeApp {
             quad_pipeline,
             data,
@@ -98,20 +100,23 @@ impl GlassApp for TreeApp {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: true,
+                        store: StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
             quad_pipeline.draw(
                 &mut rpass,
                 &tree_data.tree_bind_group,
-                [0.0; 4],
+                [250.0, 250.0, 0.0, 0.0],
                 camera_projection([width, height]).to_cols_array_2d(),
                 tree_data.tree.size,
                 1.0,
             );
         }
+        None
     }
 }
 
@@ -123,8 +128,11 @@ struct ExampleData {
 fn create_example_data(context: &GlassContext, quad_pipeline: &QuadPipeline) -> ExampleData {
     let tree = create_tree_texture(context);
     // Create bind group
-    let tree_bind_group =
-        quad_pipeline.create_bind_group(context.device(), &tree.views[0], &tree.sampler);
+    let tree_bind_group = quad_pipeline.create_bind_group(
+        context.device(),
+        &tree.views[0],
+        context.sampler_linear_clamp_to_edge(),
+    );
     ExampleData {
         tree,
         tree_bind_group,
@@ -139,15 +147,6 @@ fn create_tree_texture(app: &GlassContext) -> Texture {
         diffuse_bytes,
         "tree.png",
         TextureFormat::Rgba8UnormSrgb,
-        &SamplerDescriptor {
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            address_mode_w: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Linear,
-            ..Default::default()
-        },
         TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
     )
     .unwrap()
